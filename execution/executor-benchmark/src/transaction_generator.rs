@@ -3,13 +3,12 @@
 
 use aptos_crypto::{
     ed25519::{Ed25519PrivateKey, Ed25519PublicKey},
-    PrivateKey, SigningKey, Uniform,
+    PrivateKey, SigningKey,
 };
 use aptos_logger::info;
-use aptos_sdk::transaction_builder::TransactionFactory;
+use aptos_sdk::{transaction_builder::TransactionFactory, types::LocalAccount};
 use aptos_state_view::account_with_state_view::AsAccountWithStateView;
 use aptos_types::{
-    account_address::AccountAddress,
     account_config::aptos_root_address,
     account_view::AccountView,
     chain_id::ChainId,
@@ -58,24 +57,15 @@ struct P2pTestCase {
     num_accounts: usize,
 }
 
-// TODO: use LocalAccount instead
-#[derive(Deserialize, Serialize)]
-struct AccountData {
-    private_key: Ed25519PrivateKey,
-    public_key: Ed25519PublicKey,
-    address: AccountAddress,
-    sequence_number: u64,
-}
-
 pub struct TransactionGenerator {
     /// The current state of the accounts. The main purpose is to keep track of the sequence number
     /// so generated transactions are guaranteed to be successfully executed.
-    accounts_cache: Vec<AccountData>,
+    accounts_cache: Vec<LocalAccount>,
 
     /// The current state of seed accounts. The purpose of the seed accounts to parallelize the
     /// account creation and minting process so that they are not blocked on sequence number of
     /// a single root account.
-    seed_accounts_cache: Vec<AccountData>,
+    seed_accounts_cache: Vec<LocalAccount>,
 
     /// Total number of accounts in the DB
     num_accounts: usize,
@@ -136,7 +126,7 @@ impl TransactionGenerator {
         }
     }
 
-    fn gen_account_cache(num_accounts: usize, seed_account: bool) -> Vec<AccountData> {
+    fn gen_account_cache(num_accounts: usize, seed_account: bool) -> Vec<LocalAccount> {
         let start = Instant::now();
         let seed = if seed_account { [1u8; 32] } else { [2u8; 32] };
         let mut rng = StdRng::from_seed(seed);
@@ -153,15 +143,7 @@ impl TransactionGenerator {
         }
         let bar = get_progress_bar(num_accounts);
         for _i in 0..num_accounts {
-            let private_key = Ed25519PrivateKey::generate(&mut rng);
-            let public_key = private_key.public_key();
-            let address = aptos_types::account_address::from_public_key(&public_key);
-            let account = AccountData {
-                private_key,
-                public_key,
-                address,
-                sequence_number: 0,
-            };
+            let account = LocalAccount::generate(&mut rng);
             accounts.push(account);
             bar.inc(1);
         }
@@ -267,7 +249,7 @@ impl TransactionGenerator {
                     &self.genesis_key,
                     self.genesis_key.public_key(),
                     Self::transaction_factory()
-                        .create_user_account(&account.public_key)
+                        .create_user_account(account.public_key())
                         .sender(root_address)
                         .sequence_number((i * block_size + j) as u64)
                         .build(),
@@ -310,15 +292,15 @@ impl TransactionGenerator {
                         .index(0);
                 let seed_account = &self.seed_accounts_cache[seed_index];
                 let txn = create_transaction(
-                    &seed_account.private_key,
-                    seed_account.public_key.clone(),
+                    seed_account.private_key(),
+                    seed_account.public_key().clone(),
                     Self::transaction_factory()
-                        .create_and_fund_user_account(&account.public_key, init_account_balance)
-                        .sender(seed_account.address)
-                        .sequence_number(seed_account.sequence_number)
+                        .create_and_fund_user_account(account.public_key(), init_account_balance)
+                        .sender(seed_account.address())
+                        .sequence_number(seed_account.sequence_number())
                         .build(),
                 );
-                self.seed_accounts_cache[seed_index].sequence_number += 1;
+                *self.seed_accounts_cache[seed_index].sequence_number_mut() += 1;
                 transactions.push(txn);
             }
             transactions.push(Transaction::StateCheckpoint);
@@ -358,7 +340,7 @@ impl TransactionGenerator {
                     &self.genesis_key,
                     self.genesis_key.public_key(),
                     Self::transaction_factory()
-                        .mint(account.address, seed_account_balance)
+                        .mint(account.address(), seed_account_balance)
                         .sender(root_address)
                         .sequence_number((total_accounts + i * block_size + j) as u64)
                         .build(),
@@ -398,16 +380,16 @@ impl TransactionGenerator {
                 let sender = &self.accounts_cache[sender_idx];
                 let receiver = &self.accounts_cache[receiver_idx];
                 let txn = create_transaction(
-                    &sender.private_key,
-                    sender.public_key.clone(),
+                    sender.private_key(),
+                    sender.public_key().clone(),
                     Self::transaction_factory()
-                        .transfer(receiver.address, 1)
-                        .sender(sender.address)
-                        .sequence_number(sender.sequence_number)
+                        .transfer(receiver.address(), 1)
+                        .sender(sender.address())
+                        .sequence_number(sender.sequence_number())
                         .build(),
                 );
                 transactions.push(txn);
-                self.accounts_cache[sender_idx].sequence_number += 1;
+                *self.accounts_cache[sender_idx].sequence_number_mut() += 1;
             }
             transactions.push(Transaction::StateCheckpoint);
             self.version += transactions.len() as Version;
@@ -430,7 +412,7 @@ impl TransactionGenerator {
         );
         let bar = get_progress_bar(self.accounts_cache.len());
         self.accounts_cache.par_iter().for_each(|account| {
-            let address = account.address;
+            let address = account.address();
             let db_state_view = db.latest_state_checkpoint_view().unwrap();
             let address_account_view = db_state_view.as_account_with_state_view(&address);
             assert_eq!(
@@ -439,7 +421,7 @@ impl TransactionGenerator {
                     .unwrap()
                     .unwrap()
                     .sequence_number(),
-                account.sequence_number
+                account.sequence_number()
             );
             bar.inc(1);
         });
